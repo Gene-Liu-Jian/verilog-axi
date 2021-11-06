@@ -34,17 +34,17 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge
 from cocotb.regression import TestFactory
 
-from cocotbext.axi import AxiRamWrite
-from cocotbext.axi import AxiStreamFrame, AxiStreamSource
+from cocotbext.axi import AxiWriteBus, AxiRamWrite
+from cocotbext.axi import AxiStreamBus, AxiStreamFrame, AxiStreamSource
 from cocotbext.axi.stream import define_stream
 
-DescTransaction, DescSource, DescSink, DescMonitor = define_stream("Desc",
+DescBus, DescTransaction, DescSource, DescSink, DescMonitor = define_stream("Desc",
     signals=["addr", "len", "tag", "valid", "ready"],
     optional_signals=["id", "dest", "user"]
 )
 
-DescStatusTransaction, DescStatusSource, DescStatusSink, DescStatusMonitor = define_stream("DescStatus",
-    signals=["tag", "valid"],
+DescStatusBus, DescStatusTransaction, DescStatusSource, DescStatusSink, DescStatusMonitor = define_stream("DescStatus",
+    signals=["tag", "error", "valid"],
     optional_signals=["len", "id", "dest", "user"]
 )
 
@@ -59,12 +59,12 @@ class TB(object):
         cocotb.fork(Clock(dut.clk, 10, units="ns").start())
 
         # write interface
-        self.write_desc_source = DescSource(dut, "s_axis_write_desc", dut.clk, dut.rst)
-        self.write_desc_status_sink = DescStatusSink(dut, "m_axis_write_desc_status", dut.clk, dut.rst)
-        self.write_data_source = AxiStreamSource(dut, "s_axis_write_data", dut.clk, dut.rst)
+        self.write_desc_source = DescSource(DescBus.from_prefix(dut, "s_axis_write_desc"), dut.clk, dut.rst)
+        self.write_desc_status_sink = DescStatusSink(DescStatusBus.from_prefix(dut, "m_axis_write_desc_status"), dut.clk, dut.rst)
+        self.write_data_source = AxiStreamSource(AxiStreamBus.from_prefix(dut, "s_axis_write_data"), dut.clk, dut.rst)
 
         # AXI interface
-        self.axi_ram = AxiRamWrite(dut, "m_axi", dut.clk, dut.rst, size=2**16)
+        self.axi_ram = AxiRamWrite(AxiWriteBus.from_prefix(dut, "m_axi"), dut.clk, dut.rst, size=2**16)
 
         dut.enable.setimmediatevalue(0)
         dut.abort.setimmediatevalue(0)
@@ -95,8 +95,8 @@ async def run_test_write(dut, data_in=None, idle_inserter=None, backpressure_ins
 
     tb = TB(dut)
 
-    byte_width = tb.axi_ram.byte_width
-    step_size = 1 if int(os.getenv("PARAM_ENABLE_UNALIGNED")) else byte_width
+    byte_lanes = tb.axi_ram.byte_lanes
+    step_size = 1 if int(os.getenv("PARAM_ENABLE_UNALIGNED")) else byte_lanes
     tag_count = 2**len(tb.write_desc_source.bus.tag)
 
     cur_tag = 1
@@ -108,8 +108,8 @@ async def run_test_write(dut, data_in=None, idle_inserter=None, backpressure_ins
 
     dut.enable <= 1
 
-    for length in list(range(1, byte_width*4+1))+[128]:
-        for offset in list(range(0, byte_width*2, step_size))+list(range(4096-byte_width*2, 4096, step_size)):
+    for length in list(range(1, byte_lanes*4+1))+[128]:
+        for offset in list(range(0, byte_lanes*2, step_size))+list(range(4096-byte_lanes*2, 4096, step_size)):
             for diff in [-8, -2, -1, 0, 1, 2, 8]:
                 if length+diff < 1:
                     continue
@@ -132,6 +132,7 @@ async def run_test_write(dut, data_in=None, idle_inserter=None, backpressure_ins
                 assert int(status.len) == min(len(test_data), len(test_data2))
                 assert int(status.tag) == cur_tag
                 assert int(status.id) == cur_tag
+                assert int(status.error) == 0
 
                 tb.log.debug("%s", tb.axi_ram.hexdump_str((addr & ~0xf)-16, (((addr & 0xf)+length-1) & ~0xf)+48))
 
@@ -201,8 +202,8 @@ def test_axi_dma_wr(request, axi_data_width, unaligned):
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}
 
-    sim_build = os.path.join(tests_dir,
-        "sim_build_"+request.node.name.replace('[', '-').replace(']', ''))
+    sim_build = os.path.join(tests_dir, "sim_build",
+        request.node.name.replace('[', '-').replace(']', ''))
 
     cocotb_test.simulator.run(
         python_search=[tests_dir],

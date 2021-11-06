@@ -34,15 +34,15 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge
 from cocotb.regression import TestFactory
 
-from cocotbext.axi import AxiRam
+from cocotbext.axi import AxiBus, AxiRam
 from cocotbext.axi.stream import define_stream
 
-DescTransaction, DescSource, DescSink, DescMonitor = define_stream("Desc",
+DescBus, DescTransaction, DescSource, DescSink, DescMonitor = define_stream("Desc",
     signals=["read_addr", "write_addr", "len", "tag", "valid", "ready"]
 )
 
-DescStatusTransaction, DescStatusSource, DescStatusSink, DescStatusMonitor = define_stream("DescStatus",
-    signals=["tag", "valid"]
+DescStatusBus, DescStatusTransaction, DescStatusSource, DescStatusSink, DescStatusMonitor = define_stream("DescStatus",
+    signals=["tag", "error", "valid"]
 )
 
 
@@ -56,11 +56,11 @@ class TB(object):
         cocotb.fork(Clock(dut.clk, 10, units="ns").start())
 
         # control interface
-        self.desc_source = DescSource(dut, "s_axis_desc", dut.clk, dut.rst)
-        self.desc_status_sink = DescStatusSink(dut, "m_axis_desc_status", dut.clk, dut.rst)
+        self.desc_source = DescSource(DescBus.from_prefix(dut, "s_axis_desc"), dut.clk, dut.rst)
+        self.desc_status_sink = DescStatusSink(DescStatusBus.from_prefix(dut, "m_axis_desc_status"), dut.clk, dut.rst)
 
         # AXI interface
-        self.axi_ram = AxiRam(dut, "m_axi", dut.clk, dut.rst, size=2**16)
+        self.axi_ram = AxiRam(AxiBus.from_prefix(dut, "m_axi"), dut.clk, dut.rst, size=2**16)
 
         dut.enable.setimmediatevalue(0)
 
@@ -92,8 +92,8 @@ async def run_test(dut, data_in=None, idle_inserter=None, backpressure_inserter=
 
     tb = TB(dut)
 
-    byte_width = tb.axi_ram.write_if.byte_width
-    step_size = 1 if int(os.getenv("PARAM_ENABLE_UNALIGNED")) else byte_width
+    byte_lanes = tb.axi_ram.write_if.byte_lanes
+    step_size = 1 if int(os.getenv("PARAM_ENABLE_UNALIGNED")) else byte_lanes
     tag_count = 2**len(tb.desc_source.bus.tag)
 
     cur_tag = 1
@@ -105,9 +105,9 @@ async def run_test(dut, data_in=None, idle_inserter=None, backpressure_inserter=
 
     dut.enable <= 1
 
-    for length in list(range(1, byte_width*4+1))+[128]:
-        for read_offset in list(range(8, 8+byte_width*2, step_size))+list(range(4096-byte_width*2, 4096, step_size)):
-            for write_offset in list(range(8, 8+byte_width*2, step_size))+list(range(4096-byte_width*2, 4096, step_size)):
+    for length in list(range(1, byte_lanes*4+1))+[128]:
+        for read_offset in list(range(8, 8+byte_lanes*2, step_size))+list(range(4096-byte_lanes*2, 4096, step_size)):
+            for write_offset in list(range(8, 8+byte_lanes*2, step_size))+list(range(4096-byte_lanes*2, 4096, step_size)):
                 tb.log.info("length %d, read_offset %d, write_offset %d", length, read_offset, write_offset)
                 read_addr = read_offset+0x1000
                 write_addr = 0x00008000+write_offset+0x1000
@@ -123,6 +123,7 @@ async def run_test(dut, data_in=None, idle_inserter=None, backpressure_inserter=
 
                 tb.log.info("status: %s", status)
                 assert int(status.tag) == cur_tag
+                assert int(status.error) == 0
 
                 tb.log.debug("%s", tb.axi_ram.hexdump_str((write_addr & ~0xf)-16, (((write_addr & 0xf)+length-1) & ~0xf)+48))
 
@@ -156,7 +157,7 @@ rtl_dir = os.path.abspath(os.path.join(tests_dir, '..', '..', 'rtl'))
 
 @pytest.mark.parametrize("unaligned", [0, 1])
 @pytest.mark.parametrize("axi_data_width", [8, 16, 32])
-def test_axi_dma(request, axi_data_width, unaligned):
+def test_axi_cdma(request, axi_data_width, unaligned):
     dut = "axi_cdma"
     module = os.path.splitext(os.path.basename(__file__))[0]
     toplevel = dut
@@ -178,8 +179,8 @@ def test_axi_dma(request, axi_data_width, unaligned):
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}
 
-    sim_build = os.path.join(tests_dir,
-        "sim_build_"+request.node.name.replace('[', '-').replace(']', ''))
+    sim_build = os.path.join(tests_dir, "sim_build",
+        request.node.name.replace('[', '-').replace(']', ''))
 
     cocotb_test.simulator.run(
         python_search=[tests_dir],

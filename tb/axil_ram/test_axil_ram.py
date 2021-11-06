@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 
 Copyright (c) 2020 Alex Forencich
@@ -36,7 +35,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 from cocotb.regression import TestFactory
 
-from cocotbext.axi import AxiLiteMaster
+from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
 
 class TB(object):
@@ -48,7 +47,7 @@ class TB(object):
 
         cocotb.fork(Clock(dut.clk, 10, units="ns").start())
 
-        self.axil_master = AxiLiteMaster(dut, "s_axil", dut.clk, dut.rst)
+        self.axil_master = AxiLiteMaster(AxiLiteBus.from_prefix(dut, "s_axil"), dut.clk, dut.rst)
 
     def set_idle_generator(self, generator=None):
         if generator:
@@ -77,15 +76,15 @@ async def run_test_write(dut, data_in=None, idle_inserter=None, backpressure_ins
 
     tb = TB(dut)
 
-    byte_width = tb.axil_master.write_if.byte_width
+    byte_lanes = tb.axil_master.write_if.byte_lanes
 
     await tb.cycle_reset()
 
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for length in range(1, byte_width*2):
-        for offset in range(byte_width):
+    for length in range(1, byte_lanes*2):
+        for offset in range(byte_lanes):
             tb.log.info("length %d, offset %d", length, offset)
             addr = offset+0x1000
             test_data = bytearray([x % 256 for x in range(length)])
@@ -106,15 +105,15 @@ async def run_test_read(dut, data_in=None, idle_inserter=None, backpressure_inse
 
     tb = TB(dut)
 
-    byte_width = tb.axil_master.write_if.byte_width
+    byte_lanes = tb.axil_master.write_if.byte_lanes
 
     await tb.cycle_reset()
 
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for length in range(1, byte_width*2):
-        for offset in range(byte_width):
+    for length in range(1, byte_lanes*2):
+        for offset in range(byte_lanes):
             tb.log.info("length %d, offset %d", length, offset)
             addr = offset+0x1000
             test_data = bytearray([x % 256 for x in range(length)])
@@ -190,13 +189,6 @@ rtl_dir = os.path.abspath(os.path.join(tests_dir, '..', '..', 'rtl'))
 
 @pytest.mark.parametrize("data_width", [8, 16, 32])
 def test_axil_ram(request, data_width):
-    run_test(
-        parameters={'DATA_WIDTH': data_width},
-        sim_build="sim_build_"+request.node.name.replace('[', '-').replace(']', ''),
-    )
-
-
-def run_test(parameters=None, sim_build="sim_build", waves=None, force_compile=False):
     dut = "axil_ram"
     module = os.path.splitext(os.path.basename(__file__))[0]
     toplevel = dut
@@ -205,18 +197,17 @@ def run_test(parameters=None, sim_build="sim_build", waves=None, force_compile=F
         os.path.join(rtl_dir, f"{dut}.v"),
     ]
 
-    if parameters is None:
-        parameters = {}
-    parameters = {k.upper(): v for k, v in parameters.items() if v is not None}
+    parameters = {}
 
-    parameters.setdefault('DATA_WIDTH', 32)
-    parameters.setdefault('ADDR_WIDTH', 16)
-    parameters.setdefault('STRB_WIDTH', parameters['DATA_WIDTH'] // 8)
-    parameters['PIPELINE_OUTPUT'] = int(parameters.get('PIPELINE_OUTPUT', 0))
+    parameters['DATA_WIDTH'] = data_width
+    parameters['ADDR_WIDTH'] = 16
+    parameters['STRB_WIDTH'] = parameters['DATA_WIDTH'] // 8
+    parameters['PIPELINE_OUTPUT'] = 0
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}
 
-    sim_build = os.path.join(tests_dir, sim_build)
+    sim_build = os.path.join(tests_dir, "sim_build",
+        request.node.name.replace('[', '-').replace(']', ''))
 
     cocotb_test.simulator.run(
         python_search=[tests_dir],
@@ -226,60 +217,4 @@ def run_test(parameters=None, sim_build="sim_build", waves=None, force_compile=F
         parameters=parameters,
         sim_build=sim_build,
         extra_env=extra_env,
-        force_compile=force_compile,
-        waves=waves,
     )
-
-
-if __name__ == '__main__':
-    import argparse
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--data_width', type=int, default=32)
-    parser.add_argument('--addr_width', type=int, default=16)
-    parser.add_argument('--strb_width', type=int)
-    parser.add_argument('--pipeline_output', type=bool, default=False)
-    parser.add_argument('--waves', type=bool)
-    parser.add_argument('--sim_build', type=str, default="sim_build")
-    parser.add_argument('--force_compile', type=bool, default=True)
-    parser.add_argument('--clean', action='store_true')
-
-    args = vars(parser.parse_args())
-
-    if args.pop("clean"):
-        import glob
-        import shutil
-        for f in glob.glob(os.path.join(tests_dir, "sim_build*")):
-            shutil.rmtree(f)
-
-    else:
-        sim_build = args.pop("sim_build")
-        waves = args.pop("waves")
-        force_compile = args.pop("force_compile")
-
-        run_test(args, sim_build, waves, force_compile)
-
-    # import click
-
-    # @click.group(invoke_without_command=True)
-    # @click.option('--data_width', type=int, default=32)
-    # @click.option('--addr_width', type=int, default=16)
-    # @click.option('--strb_width', type=int)
-    # @click.option('--pipeline_output', type=bool, default=False)
-    # @click.option('--waves', type=bool)
-    # @click.option('--sim_build', type=str, default="sim_build")
-    # @click.option('--force_compile', type=bool, default=True)
-    # @click.pass_context
-    # def cli(ctx, waves, sim_build, force_compile, **kwargs):
-    #     if ctx.invoked_subcommand is not None:
-    #         return
-    #     run_test(parameters=kwargs, sim_build=sim_build, waves=waves, force_compile=force_compile)
-
-    # @cli.command()
-    # def clean():
-    #     import glob
-    #     import shutil
-    #     for f in glob.glob(os.path.join(tests_dir, "sim_build*")):
-    #         shutil.rmtree(f)
-
-    # cli()

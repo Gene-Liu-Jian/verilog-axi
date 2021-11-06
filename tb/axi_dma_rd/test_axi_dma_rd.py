@@ -34,17 +34,17 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge
 from cocotb.regression import TestFactory
 
-from cocotbext.axi import AxiRamRead
-from cocotbext.axi import AxiStreamSink
+from cocotbext.axi import AxiReadBus, AxiRamRead
+from cocotbext.axi import AxiStreamBus, AxiStreamSink
 from cocotbext.axi.stream import define_stream
 
-DescTransaction, DescSource, DescSink, DescMonitor = define_stream("Desc",
+DescBus, DescTransaction, DescSource, DescSink, DescMonitor = define_stream("Desc",
     signals=["addr", "len", "tag", "valid", "ready"],
     optional_signals=["id", "dest", "user"]
 )
 
-DescStatusTransaction, DescStatusSource, DescStatusSink, DescStatusMonitor = define_stream("DescStatus",
-    signals=["tag", "valid"],
+DescStatusBus, DescStatusTransaction, DescStatusSource, DescStatusSink, DescStatusMonitor = define_stream("DescStatus",
+    signals=["tag", "error", "valid"],
     optional_signals=["len", "id", "dest", "user"]
 )
 
@@ -59,12 +59,12 @@ class TB(object):
         cocotb.fork(Clock(dut.clk, 10, units="ns").start())
 
         # read interface
-        self.read_desc_source = DescSource(dut, "s_axis_read_desc", dut.clk, dut.rst)
-        self.read_desc_status_sink = DescStatusSink(dut, "m_axis_read_desc_status", dut.clk, dut.rst)
-        self.read_data_sink = AxiStreamSink(dut, "m_axis_read_data", dut.clk, dut.rst)
+        self.read_desc_source = DescSource(DescBus.from_prefix(dut, "s_axis_read_desc"), dut.clk, dut.rst)
+        self.read_desc_status_sink = DescStatusSink(DescStatusBus.from_prefix(dut, "m_axis_read_desc_status"), dut.clk, dut.rst)
+        self.read_data_sink = AxiStreamSink(AxiStreamBus.from_prefix(dut, "m_axis_read_data"), dut.clk, dut.rst)
 
         # AXI interface
-        self.axi_ram = AxiRamRead(dut, "m_axi", dut.clk, dut.rst, size=2**16)
+        self.axi_ram = AxiRamRead(AxiReadBus.from_prefix(dut, "m_axi"), dut.clk, dut.rst, size=2**16)
 
         dut.enable.setimmediatevalue(0)
 
@@ -94,8 +94,8 @@ async def run_test_read(dut, data_in=None, idle_inserter=None, backpressure_inse
 
     tb = TB(dut)
 
-    byte_width = tb.axi_ram.byte_width
-    step_size = 1 if int(os.getenv("PARAM_ENABLE_UNALIGNED")) else byte_width
+    byte_lanes = tb.axi_ram.byte_lanes
+    step_size = 1 if int(os.getenv("PARAM_ENABLE_UNALIGNED")) else byte_lanes
     tag_count = 2**len(tb.read_desc_source.bus.tag)
 
     cur_tag = 1
@@ -107,8 +107,8 @@ async def run_test_read(dut, data_in=None, idle_inserter=None, backpressure_inse
 
     dut.enable <= 1
 
-    for length in list(range(1, byte_width*4+1))+[128]:
-        for offset in list(range(0, byte_width*2, step_size))+list(range(4096-byte_width*2, 4096, step_size)):
+    for length in list(range(1, byte_lanes*4+1))+[128]:
+        for offset in list(range(0, byte_lanes*2, step_size))+list(range(4096-byte_lanes*2, 4096, step_size)):
             tb.log.info("length %d, offset %d", length, offset)
             addr = offset+0x1000
             test_data = bytearray([x % 256 for x in range(length)])
@@ -129,6 +129,7 @@ async def run_test_read(dut, data_in=None, idle_inserter=None, backpressure_inse
             tb.log.info("read_data: %s", read_data)
 
             assert int(status.tag) == cur_tag
+            assert int(status.error) == 0
             assert read_data.tdata == test_data
             assert read_data.tid == cur_tag
 
@@ -193,8 +194,8 @@ def test_axi_dma_rd(request, axi_data_width, unaligned):
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}
 
-    sim_build = os.path.join(tests_dir,
-        "sim_build_"+request.node.name.replace('[', '-').replace(']', ''))
+    sim_build = os.path.join(tests_dir, "sim_build",
+        request.node.name.replace('[', '-').replace(']', ''))
 
     cocotb_test.simulator.run(
         python_search=[tests_dir],

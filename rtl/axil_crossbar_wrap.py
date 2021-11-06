@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Generates an AXI lite interconnect wrapper with the specified number of ports
+Generates an AXI lite crossbar wrapper with the specified number of ports
 """
 
 import argparse
@@ -31,19 +31,19 @@ def generate(ports=4, name=None, output=None):
         m, n = ports
 
     if name is None:
-        name = "axil_interconnect_wrap_{0}x{1}".format(m, n)
+        name = "axil_crossbar_wrap_{0}x{1}".format(m, n)
 
     if output is None:
         output = name + ".v"
 
-    print("Generating {0}x{1} port AXI lite interconnect wrapper {2}...".format(m, n, name))
+    print("Generating {0}x{1} port AXI lite crossbar wrapper {2}...".format(m, n, name))
 
     cm = (m-1).bit_length()
     cn = (n-1).bit_length()
 
     t = Template(u"""/*
 
-Copyright (c) 2020 Alex Forencich
+Copyright (c) 2021 Alex Forencich
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -70,20 +70,73 @@ THE SOFTWARE.
 `timescale 1ns / 1ps
 
 /*
- * AXI4 lite {{m}}x{{n}} interconnect (wrapper)
+ * AXI4 lite {{m}}x{{n}} crossbar (wrapper)
  */
 module {{name}} #
 (
+    // Width of data bus in bits
     parameter DATA_WIDTH = 32,
-    parameter ADDR_WIDTH = 16,
+    // Width of address bus in bits
+    parameter ADDR_WIDTH = 32,
+    // Width of wstrb (width of data bus in words)
     parameter STRB_WIDTH = (DATA_WIDTH/8),
+{%- for p in range(m) %}
+    // Number of concurrent operations
+    parameter S{{'%02d'%p}}_ACCEPT = 16,
+{%- endfor %}
+    // Number of regions per master interface
     parameter M_REGIONS = 1,
 {%- for p in range(n) %}
+    // Master interface base addresses
+    // M_REGIONS concatenated fields of ADDR_WIDTH bits
     parameter M{{'%02d'%p}}_BASE_ADDR = 0,
+    // Master interface address widths
+    // M_REGIONS concatenated fields of 32 bits
     parameter M{{'%02d'%p}}_ADDR_WIDTH = {M_REGIONS{32'd24}},
+    // Read connections between interfaces
+    // S_COUNT bits
     parameter M{{'%02d'%p}}_CONNECT_READ = {{m}}'b{% for p in range(m) %}1{% endfor %},
+    // Write connections between interfaces
+    // S_COUNT bits
     parameter M{{'%02d'%p}}_CONNECT_WRITE = {{m}}'b{% for p in range(m) %}1{% endfor %},
-    parameter M{{'%02d'%p}}_SECURE = 1'b0{% if not loop.last %},{% endif %}
+    // Number of concurrent operations for each master interface
+    parameter M{{'%02d'%p}}_ISSUE = 16,
+    // Secure master (fail operations based on awprot/arprot)
+    parameter M{{'%02d'%p}}_SECURE = 0,
+{%- endfor %}
+{%- for p in range(m) %}
+    // Slave interface AW channel register type (input)
+    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    parameter S{{'%02d'%p}}_AW_REG_TYPE = 0,
+    // Slave interface W channel register type (input)
+    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    parameter S{{'%02d'%p}}_W_REG_TYPE = 0,
+    // Slave interface B channel register type (output)
+    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    parameter S{{'%02d'%p}}_B_REG_TYPE = 1,
+    // Slave interface AR channel register type (input)
+    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    parameter S{{'%02d'%p}}_AR_REG_TYPE = 0,
+    // Slave interface R channel register type (output)
+    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    parameter S{{'%02d'%p}}_R_REG_TYPE = 2,
+{%- endfor %}
+{%- for p in range(n) %}
+    // Master interface AW channel register type (output)
+    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    parameter M{{'%02d'%p}}_AW_REG_TYPE = 1,
+    // Master interface W channel register type (output)
+    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    parameter M{{'%02d'%p}}_W_REG_TYPE = 2,
+    // Master interface B channel register type (input)
+    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    parameter M{{'%02d'%p}}_B_REG_TYPE = 0,
+    // Master interface AR channel register type (output)
+    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    parameter M{{'%02d'%p}}_AR_REG_TYPE = 1,
+    // Master interface R channel register type (input)
+    // 0 to bypass, 1 for simple buffer, 2 for skid buffer
+    parameter M{{'%02d'%p}}_R_REG_TYPE = 0{% if not loop.last %},{% endif %}
 {%- endfor %}
 )
 (
@@ -156,24 +209,44 @@ function [S_COUNT-1:0] w_s(input [S_COUNT-1:0] val);
     w_s = val;
 endfunction
 
+function [31:0] w_32(input [31:0] val);
+    w_32 = val;
+endfunction
+
+function [1:0] w_2(input [1:0] val);
+    w_2 = val;
+endfunction
+
 function w_1(input val);
     w_1 = val;
 endfunction
 
-axil_interconnect #(
+axil_crossbar #(
     .S_COUNT(S_COUNT),
     .M_COUNT(M_COUNT),
     .DATA_WIDTH(DATA_WIDTH),
     .ADDR_WIDTH(ADDR_WIDTH),
     .STRB_WIDTH(STRB_WIDTH),
+    .S_ACCEPT({ {% for p in range(m-1,-1,-1) %}w_32(S{{'%02d'%p}}_ACCEPT){% if not loop.last %}, {% endif %}{% endfor %} }),
     .M_REGIONS(M_REGIONS),
     .M_BASE_ADDR({ {% for p in range(n-1,-1,-1) %}w_a_r(M{{'%02d'%p}}_BASE_ADDR){% if not loop.last %}, {% endif %}{% endfor %} }),
     .M_ADDR_WIDTH({ {% for p in range(n-1,-1,-1) %}w_32_r(M{{'%02d'%p}}_ADDR_WIDTH){% if not loop.last %}, {% endif %}{% endfor %} }),
     .M_CONNECT_READ({ {% for p in range(n-1,-1,-1) %}w_s(M{{'%02d'%p}}_CONNECT_READ){% if not loop.last %}, {% endif %}{% endfor %} }),
     .M_CONNECT_WRITE({ {% for p in range(n-1,-1,-1) %}w_s(M{{'%02d'%p}}_CONNECT_WRITE){% if not loop.last %}, {% endif %}{% endfor %} }),
-    .M_SECURE({ {% for p in range(n-1,-1,-1) %}w_1(M{{'%02d'%p}}_SECURE){% if not loop.last %}, {% endif %}{% endfor %} })
+    .M_ISSUE({ {% for p in range(n-1,-1,-1) %}w_32(M{{'%02d'%p}}_ISSUE){% if not loop.last %}, {% endif %}{% endfor %} }),
+    .M_SECURE({ {% for p in range(n-1,-1,-1) %}w_1(M{{'%02d'%p}}_SECURE){% if not loop.last %}, {% endif %}{% endfor %} }),
+    .S_AR_REG_TYPE({ {% for p in range(m-1,-1,-1) %}w_2(S{{'%02d'%p}}_AR_REG_TYPE){% if not loop.last %}, {% endif %}{% endfor %} }),
+    .S_R_REG_TYPE({ {% for p in range(m-1,-1,-1) %}w_2(S{{'%02d'%p}}_R_REG_TYPE){% if not loop.last %}, {% endif %}{% endfor %} }),
+    .S_AW_REG_TYPE({ {% for p in range(m-1,-1,-1) %}w_2(S{{'%02d'%p}}_AW_REG_TYPE){% if not loop.last %}, {% endif %}{% endfor %} }),
+    .S_W_REG_TYPE({ {% for p in range(m-1,-1,-1) %}w_2(S{{'%02d'%p}}_W_REG_TYPE){% if not loop.last %}, {% endif %}{% endfor %} }),
+    .S_B_REG_TYPE({ {% for p in range(m-1,-1,-1) %}w_2(S{{'%02d'%p}}_B_REG_TYPE){% if not loop.last %}, {% endif %}{% endfor %} }),
+    .M_AR_REG_TYPE({ {% for p in range(n-1,-1,-1) %}w_2(M{{'%02d'%p}}_AR_REG_TYPE){% if not loop.last %}, {% endif %}{% endfor %} }),
+    .M_R_REG_TYPE({ {% for p in range(n-1,-1,-1) %}w_2(M{{'%02d'%p}}_R_REG_TYPE){% if not loop.last %}, {% endif %}{% endfor %} }),
+    .M_AW_REG_TYPE({ {% for p in range(n-1,-1,-1) %}w_2(M{{'%02d'%p}}_AW_REG_TYPE){% if not loop.last %}, {% endif %}{% endfor %} }),
+    .M_W_REG_TYPE({ {% for p in range(n-1,-1,-1) %}w_2(M{{'%02d'%p}}_W_REG_TYPE){% if not loop.last %}, {% endif %}{% endfor %} }),
+    .M_B_REG_TYPE({ {% for p in range(n-1,-1,-1) %}w_2(M{{'%02d'%p}}_B_REG_TYPE){% if not loop.last %}, {% endif %}{% endfor %} })
 )
-axil_interconnect_inst (
+axil_crossbar_inst (
     .clk(clk),
     .rst(rst),
     .s_axil_awaddr({ {% for p in range(m-1,-1,-1) %}s{{'%02d'%p}}_axil_awaddr{% if not loop.last %}, {% endif %}{% endfor %} }),

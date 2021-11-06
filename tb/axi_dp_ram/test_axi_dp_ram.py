@@ -35,7 +35,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 from cocotb.regression import TestFactory
 
-from cocotbext.axi import AxiMaster
+from cocotbext.axi import AxiBus, AxiMaster
 
 
 class TB(object):
@@ -50,8 +50,8 @@ class TB(object):
 
         self.axi_master = []
 
-        self.axi_master.append(AxiMaster(dut, "s_axi_a", dut.a_clk, dut.a_rst))
-        self.axi_master.append(AxiMaster(dut, "s_axi_b", dut.b_clk, dut.b_rst))
+        self.axi_master.append(AxiMaster(AxiBus.from_prefix(dut, "s_axi_a"), dut.a_clk, dut.a_rst))
+        self.axi_master.append(AxiMaster(AxiBus.from_prefix(dut, "s_axi_b"), dut.b_clk, dut.b_rst))
 
     def set_idle_generator(self, generator=None):
         if generator:
@@ -87,7 +87,7 @@ async def run_test_write(dut, port=0, data_in=None, idle_inserter=None, backpres
     tb = TB(dut)
 
     axi_master = tb.axi_master[port]
-    byte_width = axi_master.write_if.byte_width
+    byte_lanes = axi_master.write_if.byte_lanes
     max_burst_size = axi_master.write_if.max_burst_size
 
     if size is None:
@@ -98,8 +98,8 @@ async def run_test_write(dut, port=0, data_in=None, idle_inserter=None, backpres
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for length in list(range(1, byte_width*2))+[1024]:
-        for offset in list(range(byte_width, byte_width*2))+list(range(4096-byte_width, 4096)):
+    for length in list(range(1, byte_lanes*2))+[1024]:
+        for offset in list(range(byte_lanes, byte_lanes*2))+list(range(4096-byte_lanes, 4096)):
             tb.log.info("length %d, offset %d, size %d", length, offset, size)
             addr = offset+0x1000
             test_data = bytearray([x % 256 for x in range(length)])
@@ -121,7 +121,7 @@ async def run_test_read(dut, port=0, data_in=None, idle_inserter=None, backpress
     tb = TB(dut)
 
     axi_master = tb.axi_master[port]
-    byte_width = axi_master.write_if.byte_width
+    byte_lanes = axi_master.write_if.byte_lanes
     max_burst_size = axi_master.write_if.max_burst_size
 
     if size is None:
@@ -132,8 +132,8 @@ async def run_test_read(dut, port=0, data_in=None, idle_inserter=None, backpress
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for length in list(range(1, byte_width*2))+[1024]:
-        for offset in list(range(byte_width, byte_width*2))+list(range(4096-byte_width, 4096)):
+    for length in list(range(1, byte_lanes*2))+[1024]:
+        for offset in list(range(byte_lanes, byte_lanes*2))+list(range(4096-byte_lanes, 4096)):
             tb.log.info("length %d, offset %d, size %d", length, offset, size)
             addr = offset+0x1000
             test_data = bytearray([x % 256 for x in range(length)])
@@ -152,25 +152,26 @@ async def run_test_arb(dut, data_in=None, idle_inserter=None, backpressure_inser
 
     tb = TB(dut)
 
-    byte_width = tb.axi_master[0].write_if.byte_width
-
     await tb.cycle_reset()
 
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for k in range(10):
-        tb.axi_master[0].init_write(k*256, b'\x11\x22\x33\x44')
-        tb.axi_master[0].init_read(k*256, 4)
-        tb.axi_master[1].init_write(k*256, b'\x11\x22\x33\x44')
-        tb.axi_master[1].init_read(k*256, 4)
+    async def worker(master, offset):
+        wr_op = master.init_write(offset, b'\x11\x22\x33\x44')
+        rd_op = master.init_read(offset, 4)
 
-    await tb.axi_master[0].wait()
-    await tb.axi_master[1].wait()
+        await wr_op.wait()
+        await rd_op.wait()
+
+    workers = []
 
     for k in range(10):
-        tb.axi_master[0].get_read_data()
-        tb.axi_master[1].get_read_data()
+        workers.append(cocotb.fork(worker(tb.axi_master[0], k*256)))
+        workers.append(cocotb.fork(worker(tb.axi_master[1], k*256)))
+
+    while workers:
+        await workers.pop(0).join()
 
     await RisingEdge(dut.a_clk)
     await RisingEdge(dut.a_clk)
@@ -218,9 +219,9 @@ def cycle_pause():
 
 if cocotb.SIM_NAME:
 
-    data_width = int(os.getenv("PARAM_DATA_WIDTH"))
-    byte_width = data_width // 8
-    max_burst_size = (byte_width-1).bit_length()
+    data_width = len(cocotb.top.s_axi_a_wdata)
+    byte_lanes = data_width // 8
+    max_burst_size = (byte_lanes-1).bit_length()
 
     for test in [run_test_write, run_test_read]:
 
@@ -269,8 +270,8 @@ def test_axi_dp_ram(request, data_width):
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}
 
-    sim_build = os.path.join(tests_dir,
-        "sim_build_"+request.node.name.replace('[', '-').replace(']', ''))
+    sim_build = os.path.join(tests_dir, "sim_build",
+        request.node.name.replace('[', '-').replace(']', ''))
 
     cocotb_test.simulator.run(
         python_search=[tests_dir],

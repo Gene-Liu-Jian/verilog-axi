@@ -36,23 +36,23 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 from cocotb.regression import TestFactory
 
-from cocotbext.axi import AxiLiteMaster, AxiLiteRam
+from cocotbext.axi import AxiLiteBus, AxiLiteMaster, AxiLiteRam
 
 
 class TB(object):
     def __init__(self, dut):
         self.dut = dut
 
-        s_count = int(os.getenv("PARAM_S_COUNT"))
-        m_count = int(os.getenv("PARAM_M_COUNT"))
+        s_count = len(dut.axil_interconnect_inst.s_axil_awvalid)
+        m_count = len(dut.axil_interconnect_inst.m_axil_awvalid)
 
         self.log = logging.getLogger("cocotb.tb")
         self.log.setLevel(logging.DEBUG)
 
         cocotb.fork(Clock(dut.clk, 10, units="ns").start())
 
-        self.axil_master = [AxiLiteMaster(dut, f"s{k:02d}_axil", dut.clk, dut.rst) for k in range(s_count)]
-        self.axil_ram = [AxiLiteRam(dut, f"m{k:02d}_axil", dut.clk, dut.rst, size=2**16) for k in range(m_count)]
+        self.axil_master = [AxiLiteMaster(AxiLiteBus.from_prefix(dut, f"s{k:02d}_axil"), dut.clk, dut.rst) for k in range(s_count)]
+        self.axil_ram = [AxiLiteRam(AxiLiteBus.from_prefix(dut, f"m{k:02d}_axil"), dut.clk, dut.rst, size=2**16) for k in range(m_count)]
 
     def set_idle_generator(self, generator=None):
         if generator:
@@ -90,15 +90,15 @@ async def run_test_write(dut, data_in=None, idle_inserter=None, backpressure_ins
 
     tb = TB(dut)
 
-    byte_width = tb.axil_master[s].write_if.byte_width
+    byte_lanes = tb.axil_master[s].write_if.byte_lanes
 
     await tb.cycle_reset()
 
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for length in range(1, byte_width*2):
-        for offset in range(byte_width):
+    for length in range(1, byte_lanes*2):
+        for offset in range(byte_lanes):
             tb.log.info("length %d, offset %d", length, offset)
             ram_addr = offset+0x1000
             addr = ram_addr + m*0x1000000
@@ -122,15 +122,15 @@ async def run_test_read(dut, data_in=None, idle_inserter=None, backpressure_inse
 
     tb = TB(dut)
 
-    byte_width = tb.axil_master[s].write_if.byte_width
+    byte_lanes = tb.axil_master[s].write_if.byte_lanes
 
     await tb.cycle_reset()
 
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for length in range(1, byte_width*2):
-        for offset in range(byte_width):
+    for length in range(1, byte_lanes*2):
+        for offset in range(byte_lanes):
             tb.log.info("length %d, offset %d", length, offset)
             ram_addr = offset+0x1000
             addr = ram_addr + m*0x1000000
@@ -189,8 +189,8 @@ def cycle_pause():
 
 if cocotb.SIM_NAME:
 
-    s_count = int(os.getenv("PARAM_S_COUNT"))
-    m_count = int(os.getenv("PARAM_M_COUNT"))
+    s_count = len(cocotb.top.axil_interconnect_inst.s_axil_awvalid)
+    m_count = len(cocotb.top.axil_interconnect_inst.m_axil_awvalid)
 
     for test in [run_test_write, run_test_read]:
 
@@ -247,8 +247,8 @@ def test_axil_interconnect(request, s_count, m_count, data_width):
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}
 
-    sim_build = os.path.join(tests_dir,
-        "sim_build_"+request.node.name.replace('[', '-').replace(']', ''))
+    sim_build = os.path.join(tests_dir, "sim_build",
+        request.node.name.replace('[', '-').replace(']', ''))
 
     cocotb_test.simulator.run(
         python_search=[tests_dir],

@@ -1,4 +1,4 @@
-# Copyright (c) 2020 Alex Forencich
+# Copyright (c) 2021 Alex Forencich
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -26,16 +26,28 @@ WAVES ?= 0
 COCOTB_HDL_TIMEUNIT = 1ns
 COCOTB_HDL_TIMEPRECISION = 1ps
 
-DUT      = axil_ram
-TOPLEVEL = $(DUT)
+export PARAM_S_COUNT ?= 4
+export PARAM_M_COUNT ?= 4
+
+DUT      = axil_crossbar
+WRAPPER  = $(DUT)_wrap_$(PARAM_S_COUNT)x$(PARAM_M_COUNT)
+TOPLEVEL = $(WRAPPER)
 MODULE   = test_$(DUT)
+VERILOG_SOURCES += $(WRAPPER).v
 VERILOG_SOURCES += ../../rtl/$(DUT).v
+VERILOG_SOURCES += ../../rtl/$(DUT)_addr.v
+VERILOG_SOURCES += ../../rtl/$(DUT)_rd.v
+VERILOG_SOURCES += ../../rtl/$(DUT)_wr.v
+VERILOG_SOURCES += ../../rtl/axil_register_rd.v
+VERILOG_SOURCES += ../../rtl/axil_register_wr.v
+VERILOG_SOURCES += ../../rtl/arbiter.v
+VERILOG_SOURCES += ../../rtl/priority_encoder.v
 
 # module parameters
 export PARAM_DATA_WIDTH ?= 32
-export PARAM_ADDR_WIDTH ?= 16
+export PARAM_ADDR_WIDTH ?= 32
 export PARAM_STRB_WIDTH ?= $(shell expr $(PARAM_DATA_WIDTH) / 8 )
-export PARAM_PIPELINE_OUTPUT ?= 0
+export PARAM_M_REGIONS ?= 1
 
 ifeq ($(SIM), icarus)
 	PLUSARGS += -fst
@@ -43,7 +55,7 @@ ifeq ($(SIM), icarus)
 	COMPILE_ARGS += -P $(TOPLEVEL).DATA_WIDTH=$(PARAM_DATA_WIDTH)
 	COMPILE_ARGS += -P $(TOPLEVEL).ADDR_WIDTH=$(PARAM_ADDR_WIDTH)
 	COMPILE_ARGS += -P $(TOPLEVEL).STRB_WIDTH=$(PARAM_STRB_WIDTH)
-	COMPILE_ARGS += -P $(TOPLEVEL).PIPELINE_OUTPUT=$(PARAM_PIPELINE_OUTPUT)
+	COMPILE_ARGS += -P $(TOPLEVEL).M_REGIONS=$(PARAM_M_REGIONS)
 
 	ifeq ($(WAVES), 1)
 		VERILOG_SOURCES += iverilog_dump.v
@@ -55,7 +67,7 @@ else ifeq ($(SIM), verilator)
 	COMPILE_ARGS += -GDATA_WIDTH=$(PARAM_DATA_WIDTH)
 	COMPILE_ARGS += -GADDR_WIDTH=$(PARAM_ADDR_WIDTH)
 	COMPILE_ARGS += -GSTRB_WIDTH=$(PARAM_STRB_WIDTH)
-	COMPILE_ARGS += -GPIPELINE_OUTPUT=$(PARAM_PIPELINE_OUTPUT)
+	COMPILE_ARGS += -GM_REGIONS=$(PARAM_M_REGIONS)
 
 	ifeq ($(WAVES), 1)
 		COMPILE_ARGS += --trace-fst
@@ -63,6 +75,9 @@ else ifeq ($(SIM), verilator)
 endif
 
 include $(shell cocotb-config --makefiles)/Makefile.sim
+
+$(WRAPPER).v: ../../rtl/$(DUT)_wrap.py
+	$< -p $(PARAM_S_COUNT) $(PARAM_M_COUNT)
 
 iverilog_dump.v:
 	echo 'module iverilog_dump();' > $@
@@ -75,3 +90,4 @@ iverilog_dump.v:
 clean::
 	@rm -rf iverilog_dump.v
 	@rm -rf dump.fst $(TOPLEVEL).fst
+	@rm -rf *_wrap_*.v

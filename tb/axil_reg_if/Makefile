@@ -1,4 +1,4 @@
-# Copyright (c) 2020 Alex Forencich
+# Copyright (c) 2021 Alex Forencich
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -25,17 +25,20 @@ WAVES ?= 0
 
 COCOTB_HDL_TIMEUNIT = 1ns
 COCOTB_HDL_TIMEPRECISION = 1ps
+export COCOTB_RESOLVE_X ?= RANDOM
 
-DUT      = axil_ram
+DUT      = axil_reg_if
 TOPLEVEL = $(DUT)
 MODULE   = test_$(DUT)
 VERILOG_SOURCES += ../../rtl/$(DUT).v
+VERILOG_SOURCES += ../../rtl/$(DUT)_rd.v
+VERILOG_SOURCES += ../../rtl/$(DUT)_wr.v
 
 # module parameters
 export PARAM_DATA_WIDTH ?= 32
 export PARAM_ADDR_WIDTH ?= 16
 export PARAM_STRB_WIDTH ?= $(shell expr $(PARAM_DATA_WIDTH) / 8 )
-export PARAM_PIPELINE_OUTPUT ?= 0
+export PARAM_TIMEOUT ?= 4
 
 ifeq ($(SIM), icarus)
 	PLUSARGS += -fst
@@ -43,7 +46,7 @@ ifeq ($(SIM), icarus)
 	COMPILE_ARGS += -P $(TOPLEVEL).DATA_WIDTH=$(PARAM_DATA_WIDTH)
 	COMPILE_ARGS += -P $(TOPLEVEL).ADDR_WIDTH=$(PARAM_ADDR_WIDTH)
 	COMPILE_ARGS += -P $(TOPLEVEL).STRB_WIDTH=$(PARAM_STRB_WIDTH)
-	COMPILE_ARGS += -P $(TOPLEVEL).PIPELINE_OUTPUT=$(PARAM_PIPELINE_OUTPUT)
+	COMPILE_ARGS += -P $(TOPLEVEL).TIMEOUT=$(PARAM_TIMEOUT)
 
 	ifeq ($(WAVES), 1)
 		VERILOG_SOURCES += iverilog_dump.v
@@ -55,7 +58,7 @@ else ifeq ($(SIM), verilator)
 	COMPILE_ARGS += -GDATA_WIDTH=$(PARAM_DATA_WIDTH)
 	COMPILE_ARGS += -GADDR_WIDTH=$(PARAM_ADDR_WIDTH)
 	COMPILE_ARGS += -GSTRB_WIDTH=$(PARAM_STRB_WIDTH)
-	COMPILE_ARGS += -GPIPELINE_OUTPUT=$(PARAM_PIPELINE_OUTPUT)
+	COMPILE_ARGS += -GTIMEOUT=$(PARAM_TIMEOUT)
 
 	ifeq ($(WAVES), 1)
 		COMPILE_ARGS += --trace-fst

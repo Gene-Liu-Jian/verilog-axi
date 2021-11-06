@@ -1,6 +1,6 @@
 """
 
-Copyright (c) 2020 Alex Forencich
+Copyright (c) 2021 Alex Forencich
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -26,6 +26,7 @@ import itertools
 import logging
 import os
 import random
+import subprocess
 
 import cocotb_test.simulator
 import pytest
@@ -35,36 +36,43 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 from cocotb.regression import TestFactory
 
-from cocotbext.axi import AxiBus, AxiMaster, AxiRam
+from cocotbext.axi import AxiLiteBus, AxiLiteMaster, AxiLiteRam
 
 
 class TB(object):
     def __init__(self, dut):
         self.dut = dut
 
+        s_count = len(dut.axil_crossbar_inst.s_axil_awvalid)
+        m_count = len(dut.axil_crossbar_inst.m_axil_awvalid)
+
         self.log = logging.getLogger("cocotb.tb")
         self.log.setLevel(logging.DEBUG)
 
         cocotb.fork(Clock(dut.clk, 10, units="ns").start())
 
-        self.axi_master = AxiMaster(AxiBus.from_prefix(dut, "s_axi"), dut.clk, dut.rst)
-        self.axi_ram = AxiRam(AxiBus.from_prefix(dut, "m_axi"), dut.clk, dut.rst, size=2**16)
+        self.axil_master = [AxiLiteMaster(AxiLiteBus.from_prefix(dut, f"s{k:02d}_axil"), dut.clk, dut.rst) for k in range(s_count)]
+        self.axil_ram = [AxiLiteRam(AxiLiteBus.from_prefix(dut, f"m{k:02d}_axil"), dut.clk, dut.rst, size=2**16) for k in range(m_count)]
 
     def set_idle_generator(self, generator=None):
         if generator:
-            self.axi_master.write_if.aw_channel.set_pause_generator(generator())
-            self.axi_master.write_if.w_channel.set_pause_generator(generator())
-            self.axi_master.read_if.ar_channel.set_pause_generator(generator())
-            self.axi_ram.write_if.b_channel.set_pause_generator(generator())
-            self.axi_ram.read_if.r_channel.set_pause_generator(generator())
+            for master in self.axil_master:
+                master.write_if.aw_channel.set_pause_generator(generator())
+                master.write_if.w_channel.set_pause_generator(generator())
+                master.read_if.ar_channel.set_pause_generator(generator())
+            for ram in self.axil_ram:
+                ram.write_if.b_channel.set_pause_generator(generator())
+                ram.read_if.r_channel.set_pause_generator(generator())
 
     def set_backpressure_generator(self, generator=None):
         if generator:
-            self.axi_master.write_if.b_channel.set_pause_generator(generator())
-            self.axi_master.read_if.r_channel.set_pause_generator(generator())
-            self.axi_ram.write_if.aw_channel.set_pause_generator(generator())
-            self.axi_ram.write_if.w_channel.set_pause_generator(generator())
-            self.axi_ram.read_if.ar_channel.set_pause_generator(generator())
+            for master in self.axil_master:
+                master.write_if.b_channel.set_pause_generator(generator())
+                master.read_if.r_channel.set_pause_generator(generator())
+            for ram in self.axil_ram:
+                ram.write_if.aw_channel.set_pause_generator(generator())
+                ram.write_if.w_channel.set_pause_generator(generator())
+                ram.read_if.ar_channel.set_pause_generator(generator())
 
     async def cycle_reset(self):
         self.dut.rst.setimmediatevalue(0)
@@ -78,65 +86,59 @@ class TB(object):
         await RisingEdge(self.dut.clk)
 
 
-async def run_test_write(dut, data_in=None, idle_inserter=None, backpressure_inserter=None, size=None):
+async def run_test_write(dut, data_in=None, idle_inserter=None, backpressure_inserter=None, s=0, m=0):
 
     tb = TB(dut)
 
-    byte_lanes = tb.axi_master.write_if.byte_lanes
-    max_burst_size = tb.axi_master.write_if.max_burst_size
-
-    if size is None:
-        size = max_burst_size
+    byte_lanes = tb.axil_master[s].write_if.byte_lanes
 
     await tb.cycle_reset()
 
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for length in list(range(1, byte_lanes*2))+[1024]:
-        for offset in list(range(byte_lanes, byte_lanes*2))+list(range(4096-byte_lanes, 4096)):
-            tb.log.info("length %d, offset %d, size %d", length, offset, size)
-            addr = offset+0x1000
+    for length in range(1, byte_lanes*2):
+        for offset in range(byte_lanes):
+            tb.log.info("length %d, offset %d", length, offset)
+            ram_addr = offset+0x1000
+            addr = ram_addr + m*0x1000000
             test_data = bytearray([x % 256 for x in range(length)])
 
-            tb.axi_ram.write(addr-128, b'\xaa'*(length+256))
+            tb.axil_ram[m].write(ram_addr-128, b'\xaa'*(length+256))
 
-            await tb.axi_master.write(addr, test_data, size=size)
+            await tb.axil_master[s].write(addr, test_data)
 
-            tb.log.debug("%s", tb.axi_ram.hexdump_str((addr & ~0xf)-16, (((addr & 0xf)+length-1) & ~0xf)+48))
+            tb.log.debug("%s", tb.axil_ram[m].hexdump_str((ram_addr & ~0xf)-16, (((ram_addr & 0xf)+length-1) & ~0xf)+48))
 
-            assert tb.axi_ram.read(addr, length) == test_data
-            assert tb.axi_ram.read(addr-1, 1) == b'\xaa'
-            assert tb.axi_ram.read(addr+length, 1) == b'\xaa'
+            assert tb.axil_ram[m].read(ram_addr, length) == test_data
+            assert tb.axil_ram[m].read(ram_addr-1, 1) == b'\xaa'
+            assert tb.axil_ram[m].read(ram_addr+length, 1) == b'\xaa'
 
     await RisingEdge(dut.clk)
     await RisingEdge(dut.clk)
 
 
-async def run_test_read(dut, data_in=None, idle_inserter=None, backpressure_inserter=None, size=None):
+async def run_test_read(dut, data_in=None, idle_inserter=None, backpressure_inserter=None, s=0, m=0):
 
     tb = TB(dut)
 
-    byte_lanes = tb.axi_master.write_if.byte_lanes
-    max_burst_size = tb.axi_master.write_if.max_burst_size
-
-    if size is None:
-        size = max_burst_size
+    byte_lanes = tb.axil_master[s].write_if.byte_lanes
 
     await tb.cycle_reset()
 
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for length in list(range(1, byte_lanes*2))+[1024]:
-        for offset in list(range(byte_lanes, byte_lanes*2))+list(range(4096-byte_lanes, 4096)):
-            tb.log.info("length %d, offset %d, size %d", length, offset, size)
-            addr = offset+0x1000
+    for length in range(1, byte_lanes*2):
+        for offset in range(byte_lanes):
+            tb.log.info("length %d, offset %d", length, offset)
+            ram_addr = offset+0x1000
+            addr = ram_addr + m*0x1000000
             test_data = bytearray([x % 256 for x in range(length)])
 
-            tb.axi_ram.write(addr, test_data)
+            tb.axil_ram[m].write(ram_addr, test_data)
 
-            data = await tb.axi_master.read(addr, length, size=size)
+            data = await tb.axil_master[s].read(addr, length)
 
             assert data.data == test_data
 
@@ -155,8 +157,9 @@ async def run_stress_test(dut, idle_inserter=None, backpressure_inserter=None):
 
     async def worker(master, offset, aperture, count=16):
         for k in range(count):
-            length = random.randint(1, min(512, aperture))
-            addr = offset+random.randint(0, aperture-length)
+            m = random.randrange(len(tb.axil_ram))
+            length = random.randint(1, min(32, aperture))
+            addr = offset+random.randint(0, aperture-length) + m*0x1000000
             test_data = bytearray([x % 256 for x in range(length)])
 
             await Timer(random.randint(1, 100), 'ns')
@@ -171,7 +174,7 @@ async def run_stress_test(dut, idle_inserter=None, backpressure_inserter=None):
     workers = []
 
     for k in range(16):
-        workers.append(cocotb.fork(worker(tb.axi_master, k*0x1000, 0x1000, count=16)))
+        workers.append(cocotb.fork(worker(tb.axil_master[k % len(tb.axil_master)], k*0x1000, 0x1000, count=16)))
 
     while workers:
         await workers.pop(0).join()
@@ -186,16 +189,16 @@ def cycle_pause():
 
 if cocotb.SIM_NAME:
 
-    data_width = len(cocotb.top.s_axi_wdata)
-    byte_lanes = data_width // 8
-    max_burst_size = (byte_lanes-1).bit_length()
+    s_count = len(cocotb.top.axil_crossbar_inst.s_axil_awvalid)
+    m_count = len(cocotb.top.axil_crossbar_inst.m_axil_awvalid)
 
     for test in [run_test_write, run_test_read]:
 
         factory = TestFactory(test)
         factory.add_option("idle_inserter", [None, cycle_pause])
         factory.add_option("backpressure_inserter", [None, cycle_pause])
-        factory.add_option("size", [None]+list(range(max_burst_size)))
+        factory.add_option("s", range(min(s_count, 2)))
+        factory.add_option("m", range(min(m_count, 2)))
         factory.generate_tests()
 
     factory = TestFactory(run_stress_test)
@@ -208,40 +211,44 @@ tests_dir = os.path.abspath(os.path.dirname(__file__))
 rtl_dir = os.path.abspath(os.path.join(tests_dir, '..', '..', 'rtl'))
 
 
-@pytest.mark.parametrize("reg_type", [None, 0, 1, 2])
 @pytest.mark.parametrize("data_width", [8, 16, 32])
-def test_axi_register(request, data_width, reg_type):
-    dut = "axi_register"
+@pytest.mark.parametrize("m_count", [1, 4])
+@pytest.mark.parametrize("s_count", [1, 4])
+def test_axil_crossbar(request, s_count, m_count, data_width):
+    dut = "axil_crossbar"
+    wrapper = f"{dut}_wrap_{s_count}x{m_count}"
     module = os.path.splitext(os.path.basename(__file__))[0]
-    toplevel = dut
+    toplevel = wrapper
+
+    # generate wrapper
+    wrapper_file = os.path.join(tests_dir, f"{wrapper}.v")
+    if not os.path.exists(wrapper_file):
+        subprocess.Popen(
+            [os.path.join(rtl_dir, f"{dut}_wrap.py"), "-p", f"{s_count}", f"{m_count}"],
+            cwd=tests_dir
+        ).wait()
 
     verilog_sources = [
+        wrapper_file,
         os.path.join(rtl_dir, f"{dut}.v"),
+        os.path.join(rtl_dir, f"{dut}_addr.v"),
         os.path.join(rtl_dir, f"{dut}_rd.v"),
         os.path.join(rtl_dir, f"{dut}_wr.v"),
+        os.path.join(rtl_dir, "axil_register_rd.v"),
+        os.path.join(rtl_dir, "axil_register_wr.v"),
+        os.path.join(rtl_dir, "arbiter.v"),
+        os.path.join(rtl_dir, "priority_encoder.v"),
     ]
 
     parameters = {}
 
+    parameters['S_COUNT'] = s_count
+    parameters['M_COUNT'] = m_count
+
     parameters['DATA_WIDTH'] = data_width
     parameters['ADDR_WIDTH'] = 32
     parameters['STRB_WIDTH'] = parameters['DATA_WIDTH'] // 8
-    parameters['ID_WIDTH'] = 8
-    parameters['AWUSER_ENABLE'] = 0
-    parameters['AWUSER_WIDTH'] = 1
-    parameters['WUSER_ENABLE'] = 0
-    parameters['WUSER_WIDTH'] = 1
-    parameters['BUSER_ENABLE'] = 0
-    parameters['BUSER_WIDTH'] = 1
-    parameters['ARUSER_ENABLE'] = 0
-    parameters['ARUSER_WIDTH'] = 1
-    parameters['RUSER_ENABLE'] = 0
-    parameters['RUSER_WIDTH'] = 1
-    parameters['AW_REG_TYPE'] = 1 if reg_type is None else reg_type
-    parameters['W_REG_TYPE'] = 2 if reg_type is None else reg_type
-    parameters['B_REG_TYPE'] = 1 if reg_type is None else reg_type
-    parameters['AR_REG_TYPE'] = 1 if reg_type is None else reg_type
-    parameters['R_REG_TYPE'] = 2 if reg_type is None else reg_type
+    parameters['M_REGIONS'] = 1
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}
 

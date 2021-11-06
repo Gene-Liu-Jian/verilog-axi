@@ -36,23 +36,23 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 from cocotb.regression import TestFactory
 
-from cocotbext.axi import AxiMaster, AxiRam
+from cocotbext.axi import AxiBus, AxiMaster, AxiRam
 
 
 class TB(object):
     def __init__(self, dut):
         self.dut = dut
 
-        s_count = int(os.getenv("PARAM_S_COUNT"))
-        m_count = int(os.getenv("PARAM_M_COUNT"))
+        s_count = len(dut.axi_crossbar_inst.s_axi_awvalid)
+        m_count = len(dut.axi_crossbar_inst.m_axi_awvalid)
 
         self.log = logging.getLogger("cocotb.tb")
         self.log.setLevel(logging.DEBUG)
 
         cocotb.fork(Clock(dut.clk, 10, units="ns").start())
 
-        self.axi_master = [AxiMaster(dut, f"s{k:02d}_axi", dut.clk, dut.rst) for k in range(s_count)]
-        self.axi_ram = [AxiRam(dut, f"m{k:02d}_axi", dut.clk, dut.rst, size=2**16) for k in range(m_count)]
+        self.axi_master = [AxiMaster(AxiBus.from_prefix(dut, f"s{k:02d}_axi"), dut.clk, dut.rst) for k in range(s_count)]
+        self.axi_ram = [AxiRam(AxiBus.from_prefix(dut, f"m{k:02d}_axi"), dut.clk, dut.rst, size=2**16) for k in range(m_count)]
 
         for ram in self.axi_ram:
             # prevent X propagation from screwing things up - "anything but X!"
@@ -96,7 +96,7 @@ async def run_test_write(dut, data_in=None, idle_inserter=None, backpressure_ins
 
     tb = TB(dut)
 
-    byte_width = tb.axi_master[s].write_if.byte_width
+    byte_lanes = tb.axi_master[s].write_if.byte_lanes
     max_burst_size = tb.axi_master[s].write_if.max_burst_size
 
     if size is None:
@@ -107,8 +107,8 @@ async def run_test_write(dut, data_in=None, idle_inserter=None, backpressure_ins
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for length in list(range(1, byte_width*2))+[1024]:
-        for offset in list(range(byte_width, byte_width*2))+list(range(4096-byte_width, 4096)):
+    for length in list(range(1, byte_lanes*2))+[1024]:
+        for offset in list(range(byte_lanes, byte_lanes*2))+list(range(4096-byte_lanes, 4096)):
             tb.log.info("length %d, offset %d, size %d", length, offset, size)
             ram_addr = offset+0x1000
             addr = ram_addr + m*0x1000000
@@ -132,7 +132,7 @@ async def run_test_read(dut, data_in=None, idle_inserter=None, backpressure_inse
 
     tb = TB(dut)
 
-    byte_width = tb.axi_master[s].write_if.byte_width
+    byte_lanes = tb.axi_master[s].write_if.byte_lanes
     max_burst_size = tb.axi_master[s].write_if.max_burst_size
 
     if size is None:
@@ -143,8 +143,8 @@ async def run_test_read(dut, data_in=None, idle_inserter=None, backpressure_inse
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for length in list(range(1, byte_width*2))+[1024]:
-        for offset in list(range(byte_width, byte_width*2))+list(range(4096-byte_width, 4096)):
+    for length in list(range(1, byte_lanes*2))+[1024]:
+        for offset in list(range(byte_lanes, byte_lanes*2))+list(range(4096-byte_lanes, 4096)):
             tb.log.info("length %d, offset %d, size %d", length, offset, size)
             ram_addr = offset+0x1000
             addr = ram_addr + m*0x1000000
@@ -203,12 +203,12 @@ def cycle_pause():
 
 if cocotb.SIM_NAME:
 
-    s_count = int(os.getenv("PARAM_S_COUNT"))
-    m_count = int(os.getenv("PARAM_M_COUNT"))
+    s_count = len(cocotb.top.axi_crossbar_inst.s_axi_awvalid)
+    m_count = len(cocotb.top.axi_crossbar_inst.m_axi_awvalid)
 
-    data_width = int(os.getenv("PARAM_DATA_WIDTH"))
-    byte_width = data_width // 8
-    max_burst_size = (byte_width-1).bit_length()
+    data_width = len(cocotb.top.s00_axi_wdata)
+    byte_lanes = data_width // 8
+    max_burst_size = (byte_lanes-1).bit_length()
 
     for test in [run_test_write, run_test_read]:
 
@@ -283,8 +283,8 @@ def test_axi_crossbar(request, s_count, m_count, data_width):
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}
 
-    sim_build = os.path.join(tests_dir,
-        "sim_build_"+request.node.name.replace('[', '-').replace(']', ''))
+    sim_build = os.path.join(tests_dir, "sim_build",
+        request.node.name.replace('[', '-').replace(']', ''))
 
     cocotb_test.simulator.run(
         python_search=[tests_dir],

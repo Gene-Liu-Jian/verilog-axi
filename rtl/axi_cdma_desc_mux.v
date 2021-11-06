@@ -42,10 +42,10 @@ module axi_cdma_desc_mux #
     // Output tag field width (towards CDMA module)
     // Additional bits required for response routing
     parameter M_TAG_WIDTH = S_TAG_WIDTH+$clog2(PORTS),
-    // arbitration type: "PRIORITY" or "ROUND_ROBIN"
-    parameter ARB_TYPE = "PRIORITY",
-    // LSB priority: "LOW", "HIGH"
-    parameter LSB_PRIORITY = "HIGH"
+    // select round robin arbitration
+    parameter ARB_TYPE_ROUND_ROBIN = 1,
+    // LSB priority selection
+    parameter ARB_LSB_HIGH_PRIORITY = 1
 )
 (
     input  wire                            clk,
@@ -65,6 +65,7 @@ module axi_cdma_desc_mux #
      * Descriptor status input (from AXI CDMA core)
      */
     input  wire [M_TAG_WIDTH-1:0]          s_axis_desc_status_tag,
+    input  wire [3:0]                      s_axis_desc_status_error,
     input  wire                            s_axis_desc_status_valid,
 
     /*
@@ -81,6 +82,7 @@ module axi_cdma_desc_mux #
      * Descriptor status output
      */
     output wire [PORTS*S_TAG_WIDTH-1:0]    m_axis_desc_status_tag,
+    output wire [PORTS*4-1:0]              m_axis_desc_status_error,
     output wire [PORTS-1:0]                m_axis_desc_status_valid
 );
 
@@ -123,9 +125,10 @@ wire                      current_s_desc_ready       = s_axis_desc_ready[grant_e
 // arbiter instance
 arbiter #(
     .PORTS(PORTS),
-    .TYPE(ARB_TYPE),
-    .BLOCK("ACKNOWLEDGE"),
-    .LSB_PRIORITY(LSB_PRIORITY)
+    .ARB_TYPE_ROUND_ROBIN(ARB_TYPE_ROUND_ROBIN),
+    .ARB_BLOCK(1),
+    .ARB_BLOCK_ACK(1),
+    .ARB_LSB_HIGH_PRIORITY(ARB_LSB_HIGH_PRIORITY)
 )
 arb_inst (
     .clk(clk),
@@ -237,9 +240,11 @@ end
 
 // descriptor status demux
 reg [S_TAG_WIDTH-1:0] m_axis_desc_status_tag_reg = {S_TAG_WIDTH{1'b0}};
+reg [3:0] m_axis_desc_status_error_reg = 4'd0;
 reg [PORTS-1:0] m_axis_desc_status_valid_reg = {PORTS{1'b0}};
 
 assign m_axis_desc_status_tag = {PORTS{m_axis_desc_status_tag_reg}};
+assign m_axis_desc_status_error = {PORTS{m_axis_desc_status_error_reg}};
 assign m_axis_desc_status_valid = m_axis_desc_status_valid_reg;
 
 always @(posedge clk) begin
@@ -250,6 +255,7 @@ always @(posedge clk) begin
     end
 
     m_axis_desc_status_tag_reg <= s_axis_desc_status_tag;
+    m_axis_desc_status_error_reg <= s_axis_desc_status_error;
 end
 
 endmodule

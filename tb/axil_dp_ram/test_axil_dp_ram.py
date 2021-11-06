@@ -35,7 +35,7 @@ from cocotb.clock import Clock
 from cocotb.triggers import RisingEdge, Timer
 from cocotb.regression import TestFactory
 
-from cocotbext.axi import AxiLiteMaster
+from cocotbext.axi import AxiLiteBus, AxiLiteMaster
 
 
 class TB(object):
@@ -50,8 +50,8 @@ class TB(object):
 
         self.axil_master = []
 
-        self.axil_master.append(AxiLiteMaster(dut, "s_axil_a", dut.a_clk, dut.a_rst))
-        self.axil_master.append(AxiLiteMaster(dut, "s_axil_b", dut.b_clk, dut.b_rst))
+        self.axil_master.append(AxiLiteMaster(AxiLiteBus.from_prefix(dut, "s_axil_a"), dut.a_clk, dut.a_rst))
+        self.axil_master.append(AxiLiteMaster(AxiLiteBus.from_prefix(dut, "s_axil_b"), dut.b_clk, dut.b_rst))
 
     def set_idle_generator(self, generator=None):
         if generator:
@@ -87,15 +87,15 @@ async def run_test_write(dut, port=0, data_in=None, idle_inserter=None, backpres
     tb = TB(dut)
 
     axil_master = tb.axil_master[port]
-    byte_width = axil_master.write_if.byte_width
+    byte_lanes = axil_master.write_if.byte_lanes
 
     await tb.cycle_reset()
 
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for length in range(1, byte_width*2):
-        for offset in range(byte_width):
+    for length in range(1, byte_lanes*2):
+        for offset in range(byte_lanes):
             tb.log.info("length %d, offset %d", length, offset)
             addr = offset+0x1000
             test_data = bytearray([x % 256 for x in range(length)])
@@ -117,15 +117,15 @@ async def run_test_read(dut, port=0, data_in=None, idle_inserter=None, backpress
     tb = TB(dut)
 
     axil_master = tb.axil_master[port]
-    byte_width = axil_master.write_if.byte_width
+    byte_lanes = axil_master.write_if.byte_lanes
 
     await tb.cycle_reset()
 
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for length in range(1, byte_width*2):
-        for offset in range(byte_width):
+    for length in range(1, byte_lanes*2):
+        for offset in range(byte_lanes):
             tb.log.info("length %d, offset %d", length, offset)
             addr = offset+0x1000
             test_data = bytearray([x % 256 for x in range(length)])
@@ -149,18 +149,21 @@ async def run_test_arb(dut, data_in=None, idle_inserter=None, backpressure_inser
     tb.set_idle_generator(idle_inserter)
     tb.set_backpressure_generator(backpressure_inserter)
 
-    for k in range(10):
-        tb.axil_master[0].init_write(k*256, b'\x11\x22\x33\x44')
-        tb.axil_master[0].init_read(k*256, 4)
-        tb.axil_master[1].init_write(k*256, b'\x11\x22\x33\x44')
-        tb.axil_master[1].init_read(k*256, 4)
+    async def worker(master, offset):
+        wr_op = master.init_write(offset, b'\x11\x22\x33\x44')
+        rd_op = master.init_read(offset, 4)
 
-    await tb.axil_master[0].wait()
-    await tb.axil_master[1].wait()
+        await wr_op.wait()
+        await rd_op.wait()
+
+    workers = []
 
     for k in range(10):
-        tb.axil_master[0].get_read_data()
-        tb.axil_master[1].get_read_data()
+        workers.append(cocotb.fork(worker(tb.axil_master[0], k*256)))
+        workers.append(cocotb.fork(worker(tb.axil_master[1], k*256)))
+
+    while workers:
+        await workers.pop(0).join()
 
     await RisingEdge(dut.a_clk)
     await RisingEdge(dut.a_clk)
@@ -250,8 +253,8 @@ def test_axil_dp_ram(request, data_width):
 
     extra_env = {f'PARAM_{k}': str(v) for k, v in parameters.items()}
 
-    sim_build = os.path.join(tests_dir,
-        "sim_build_"+request.node.name.replace('[', '-').replace(']', ''))
+    sim_build = os.path.join(tests_dir, "sim_build",
+        request.node.name.replace('[', '-').replace(']', ''))
 
     cocotb_test.simulator.run(
         python_search=[tests_dir],
